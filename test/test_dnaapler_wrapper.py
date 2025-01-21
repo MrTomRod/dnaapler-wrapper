@@ -1,6 +1,8 @@
 import gzip
 import logging
 import urllib.request
+from copy import deepcopy
+
 from dnaapler_wrapper import *
 from unittest import TestCase
 
@@ -8,6 +10,7 @@ logging.basicConfig(level=logging.INFO)
 
 test_fasta = 'data/input.fasta'
 workdir = 'data/workdir'
+os.makedirs(workdir, exist_ok=True)
 headers = [
     '>contig_1 [topology=circular]',
     '>contig_2 [topology=linear]',
@@ -28,7 +31,6 @@ expected_columns = ['Gene_Reoriented', 'Start', 'Strand', 'Top_Hit', 'Top_Hit_Le
 def get_test_fasta():
     # download and create new headers:
     url = 'https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/020/362/645/GCA_020362645.3_ASM2036264v3/GCA_020362645.3_ASM2036264v3_genomic.fna.gz'
-    os.makedirs('data', exist_ok=True)
     urllib.request.urlretrieve(url, test_fasta + '.gz')
     with (gzip.open(test_fasta + '.gz', 'rb') as fi, open(test_fasta, 'w') as fo):
         contig_counter = 0
@@ -46,7 +48,11 @@ if not os.path.exists(test_fasta):
     get_test_fasta()
 
 if not all(os.path.exists(f) for f in [test_output_fasta, test_output_table]):
-    subprocess.run(['dnaapler', 'all', '-i', 'input.fasta', '-o', 'out', '-t', '8', '-f'], cwd=workdir)
+    print('Running dnaapler...')
+    res = subprocess.run(['dnaapler', 'all', '-i', '../input.fasta', '-o', 'out', '-t', '8', '-f'],
+                         cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert res.returncode == 0, \
+        f"Error running dnaapler: {res.returncode}\n{res.stdout.decode()}\n{res.stderr.decode()}"
 
 
 class Test(TestCase):
@@ -67,9 +73,10 @@ class Test(TestCase):
             self.assertTrue(hi.startswith(f'>{ho}'), msg=f'"{ho}" does not start with "{hi}"')
 
     def test_merge_fastas(self):
+        in_fasta = read_fasta(test_fasta)
         out_fasta = read_fasta(test_output_fasta)
         out_table = read_output_table(test_output_table)
-        merged_fasta = merge_fastas(read_fasta(test_fasta), out_fasta, out_table, default_topology='circular')
+        merged_fasta = merge_fastas(deepcopy(in_fasta), out_fasta, out_table, default_topology='circular')
         self.assertEqual(header_ids, list(merged_fasta))
         expected_result_both = [
             'contig_1 [topology=circular] [dnaapler=already-reoriented]',
@@ -82,16 +89,24 @@ class Test(TestCase):
             'contig_6 [dnaapler=rotated] [dnaapler-gene=repA]',
             'contig_7 [dnaapler=rotated] [dnaapler-gene=repA]'
         ]
-        for i, (c, d) in enumerate(merged_fasta.items()):
-            self.assertEqual(expected_result[i], d['header'])
-        merged_fasta = merge_fastas(read_fasta(test_fasta), out_fasta, out_table, default_topology='linear')
+        for i, ((ci, di), (co, do)) in enumerate(zip(in_fasta.items(), merged_fasta.items())):
+            self.assertEqual(expected_result[i], do['header'])
+            if 'dnaapler=rotated' in do['header'] or 'dnaapler=reverse-complement' in do['header']:
+                self.assertNotEqual(di['seq'], do['seq'])
+            else:
+                self.assertEqual(di['seq'], do['seq'])
+        merged_fasta = merge_fastas(deepcopy(in_fasta), out_fasta, out_table, default_topology='linear')
         self.assertEqual(header_ids, list(merged_fasta))
         expected_result = expected_result_both + [
             'contig_6 [dnaapler=reverse-complement] [dnaapler-gene=repA]',  # different
             'contig_7 [dnaapler=reverse-complement] [dnaapler-gene=repA]'  # different
         ]
-        for i, (c, d) in enumerate(merged_fasta.items()):
-            self.assertEqual(expected_result[i], d['header'])
+        for i, ((ci, di), (co, do)) in enumerate(zip(in_fasta.items(), merged_fasta.items())):
+            self.assertEqual(expected_result[i], do['header'])
+            if 'dnaapler=rotated' in do['header'] or 'dnaapler=reverse-complement' in do['header']:
+                self.assertNotEqual(di['seq'], do['seq'])
+            else:
+                self.assertEqual(di['seq'], do['seq'])
 
     def test_merge_fastas_fail(self):
         in_fasta = read_fasta(test_fasta)
